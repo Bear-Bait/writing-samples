@@ -1,0 +1,136 @@
+#+TITLE: Show-Host-A Stream Incidents — SUNDAY-WEEK-1 & SUNDAY-WEEK-2
+#+DATE: MARCH 2026
+#+AUTHOR: BROADCAST-ORG Information Technology
+#+OPTIONS: toc:nil num:nil H:3
+
+* Executive Summary
+
+Two consecutive Sunday morning failures during Show-Host-A's /Show-Title-A/ (8am).
+*SUNDAY-WEEK-1:* confirmed Radiologik DJ crash on the Automation Node --- 13
+minutes of dead air; root causes were identified and fixes were applied.
+*SUNDAY-WEEK-2:* the fixes held --- no crash or network disruption on our end.
+Show-Host-A's stream was absent until 8:17am (operational, not technical).
+
+A critical structural vulnerability remains regardless: every fallback AppleScript
+on the Automation Node is an empty stub that performs no recovery action.
+Station-Manager-A has flagged this for discussion. Additionally, multiple RL
+Scheduler script variations exist for different show types (see below) --- a
+cleanup project is being scoped with Engineer-B.
+
+* Incident Summary
+
+| Date          | Dead Air | Automation Node        | Remote (Show-Host-A)           | Recovery                             | Resolution                             |
+|---------------+----------+------------------------+--------------------------------+--------------------------------------+----------------------------------------|
+| SUNDAY-WEEK-1 | 13m 02s  | Radiologik DJ crashed  | Stream available               | Hardware failover → watchdog restart | Fixes applied                          |
+| SUNDAY-WEEK-2 | ~17 min  | Healthy --- no crash   | Stream not active until 8:17am | Remote self-restore                  | [Verified] Show-Host-A did not log in  |
+
+* Timeline
+
+| Time                | Event                                                              |
+|---------------------+--------------------------------------------------------------------|
+| SUNDAY-WEEK-1 08:02 | mDNSResponder reload → blocking DNS call hangs VLC engine          |
+| SUNDAY-WEEK-1 08:09 | Radiologik DJ SIGSEGV --- dead air begins                          |
+| SUNDAY-WEEK-1 08:22 | Hardware failover engages --- broadcast restored (13m 02s dead air)|
+| SUNDAY-WEEK-1       | Root causes identified: DNS hang, CPU saturation, empty AppleScripts|
+| SUNDAY-WEEK-1       | Fixes applied: promo removed, segments disabled, DNS workaround    |
+| SUNDAY-WEEK-2 08:00 | Automation Node healthy --- no crash, no network disruption        |
+| SUNDAY-WEEK-2 08:02 | Silence detected --- stream not active                             |
+| SUNDAY-WEEK-2 08:17 | Show-Host-A's stream connects --- broadcast resumes (~17 min gap)  |
+| MARCH 2026          | Station-Manager-A contacts Show-Host-A; Show-Host-A confirms was not active on stream |
+
+* Root Cause Analysis
+
+** SUNDAY-WEEK-1 (Confirmed --- Fixes Verified Working SUNDAY-WEEK-2)
+
+Three factors converged; all identified. The SUNDAY-WEEK-2 clean run confirms the
+applied fixes were effective.
+
+*1. DNS hang (immediate trigger)*
+
+Radiologik's embedded VLC used a blocking =getaddrinfo()= call with no timeout.
+When =mDNSResponder= reloaded at 08:09:30, the lookup hung indefinitely, corrupted
+memory state, and crashed the process (=SIGSEGV= in =vlc_getaddrinfo=).
+
+*2. CPU saturation from chronic missing-asset errors (enabling factor)*
+
+A promo file absent for 2+ months caused 35+ scheduler retries at 40-minute
+intervals. Combined with BlackHole→stream sample rate resampling (48kHz→44.1kHz,
+~7% CPU overhead), baseline CPU was 12--15% before the incident.
+
+#+BEGIN_EXAMPLE
+Missing file: A_OFF_PROMO_[SHOW-TITLE-B]_CB_2024_EVERGREEN.mp3
+First error:  DECEMBER 2025  |  Last before crash: SUNDAY-WEEK-1 (prior day)
+#+END_EXAMPLE
+
+*3. Empty AppleScript fallback (recovery gap)*
+
+=DJEvent-PlayingSilenceFor8Seconds.applescript= contains only a comment --- no
+executable code. Software recovery was inert.
+
+** SUNDAY-WEEK-2 (Operational)
+
+No technical failure on our systems. Stream gap was due to Show-Host-A starting
+late.
+
+** Scheduling Overlap --- Sunday 8am Triple-Booked
+
+Segments *444, 445, and 446* are all =Enabled=True= for the same Sunday 8am slot.
+
+| Segment | Name                            | Status  |
+|---------+---------------------------------+---------|
+|     444 | SUN 8am Show-Title-A            | Enabled |
+|     445 | (duplicate)                     | Enabled |
+|     446 | Automated NO TOTH               | Enabled |
+
+** Legacy Path Poisoning --- Segment 446
+
+Segment 446 hard-codes paths to =/Users/[LEGACY-USER-PATH]/= --- a user directory
+that does not exist on the current Automation Node host.
+
+* Immediate Actions Taken
+
+- Removed [SHOW-TITLE-B] promo from Radiologik playlists
+- Disabled segments 445 and 446 for Sunday 8am slot
+- Verified SUNDAY-WEEK-2 --- Automation Node held stable with no crash
+
+* Remediation & Prevention
+
+** Remaining Immediate Items
+
+- [ ] *Enable AppleScript recovery handlers* --- implement =StreamError= and
+  =NothingInQueue= events with "Open Fallback Program" commands. Reference:
+  https://www.youtube.com/watch?v=XXqyP93oFzk
+- [ ] *Fix or remove Segment 446* --- delete legacy =/Users/[LEGACY-USER-PATH]/=
+  paths or point to valid locations
+
+** Short-Term (This Week)
+
+- [ ] *Add fallback script to meeting agenda*
+
+** Fallback Scripts --- Context
+
+Station-Manager-A has confirmed she wants to discuss the fallback scripts. Current
+state: all =DJEvent= handlers are factory stubs --- no executable code. The station
+relies entirely on hardware failover.
+
+The multiple RL Scheduler script variations exist intentionally to cover different
+show formats:
+
+| Script Type          | Notes                                |
+|----------------------+--------------------------------------|
+| Live                 | Live-to-air shows                    |
+| Prerecorded RSS      | RSS-fed prerecorded content          |
+| Prerecorded playlist | Static playlist prerecorded content  |
+| Reair No TOTH        | Reairs without top-of-hour break     |
+| Live remote          | Remote/off-site live broadcasts      |
+
+Some variations change infrequently and may be consolidation candidates.
+
+** Medium-Term (Ongoing, during downtime)
+
+- [ ] *RL Scheduler cleanup* --- audit script variations, identify consolidation
+  candidates, document which show types still need unique scripts
+- [ ] Audit multi-segment shows: Examples: 447--451 (SHOW-TITLE-C, 5 segments),
+  469--471 (SHOW-TITLE-D, 3 segments) --- determine if consolidation is appropriate
+- [ ] Deploy =node_exporter= + Prometheus; alert on CPU >80% sustained 5 min
+- [ ] Promtail → Loki for centralized Radiologik crash log collection

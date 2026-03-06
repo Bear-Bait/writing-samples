@@ -1,13 +1,13 @@
-# Creative & Journalistic Portfolio
+# Creative and Journalistic Portfolio
 
-## 📖 Novel
+## Novel
 ### The Valeries (2024, ExPat Press)
 ![The Valeries Cover](https://forrestmuelrath.com/content/images/valeries-cover.png)
 *Cover Art by Jacky Connolly*
 
 ---
 
-## 📰 Journalism & Interviews
+## Journalism and Interviews
 
 ### BOMB Magazine
 - [The Value of Labor: Rodrigo Valenzuela Interviewed](https://bombmagazine.org/articles/the-value-of-labor-rodrigo-valenzuela-interviewed/)
@@ -15,7 +15,7 @@
 
 ### Hyperallergic
 - [How Renaissance Painting Smoldered with a Little Known Hallucinogen](https://hyperallergic.com/389643/how-renaissance-painting-smoldered-with-a-little-known-hallucinogen/)
-- [Paul McCarthy’s Snow White Sex Orgy In Midtown](https://hyperallergic.com/73935/paul-mccarthys-snow-white-sex-orgy-in-midtown/)
+- [Paul McCarthys Snow White Sex Orgy In Midtown](https://hyperallergic.com/73935/paul-mccarthys-snow-white-sex-orgy-in-midtown/)
 
 ### Hobart
 - [Where to get the Sugar](https://www.hobartpulp.com/web_features/where-to-get-the-sugar)
