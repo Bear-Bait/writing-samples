@@ -1,0 +1,554 @@
+#+TITLE: Incident Report: STATION-A-AUTOMATIONS-NODE Stream Failure
+#+DATE: MARCH 2026
+#+AUTHOR: BROADCAST-ORG Automation Team
+#+SEVERITY: HIGH
+#+STATUS: RESOLVED
+#+DURATION: 13m 02s (08:09:34 - 08:22:36)
+#+OPTIONS: toc:nil num:nil H:3
+
+* Executive Summary
+
+On SUNDAY-WEEK-1 at 08:09:34, Radiologik DJ crashed during a remote stream
+pickup from Show-Host-A, causing 13 minutes of dead air. The Automation
+Node's hardware failover system automatically switched to backup content. Root
+cause: a cascading failure involving *persistent missing asset errors*
+([SHOW-TITLE-B] promo failing every 40 minutes for 2+ months), sample rate
+mismatch (48kHz $\leftrightarrow$ 44.1kHz), cumulative system resource
+exhaustion, and a DNS resolution hang in the embedded VLC engine that triggered
+a memory fault (SIGSEGV). The station recovered at 08:22:36 when Radiologik
+restarted and reconnected to the stream.
+
+** Key Metrics
+- Detection time: Immediate (failover triggered within seconds)
+- Recovery time: 13m 02s
+- Content delivered: Backup ([BACKUP-CONTENT-A])
+- Monitoring alert: Yes (hardware silence sensor)
+- Root cause confirmed: Yes (crash log + system logs)
+
+* Timeline
+
+** 08:00 - 08:02: System Instability Phase
+
+Pre-incident symptoms emerged on the Automation Node:
+
+| Time        | Component     | Event                                    |
+|-------------+---------------+------------------------------------------|
+| 08:00:00    | Radiologik DJ | "Failed to start audio engine" logged    |
+| 08:00:15    | OS            | Metal cache folder errors appear         |
+| 08:02:00    | System        | CPU elevated; mDNSResponder threads spin |
+
+*** Technical Context
+
+The system was already under stress before the incident:
+- BlackHole virtual audio interface: running at 48kHz
+- Incoming streams from partner sources: 44.1kHz
+- This sample rate mismatch forced continuous resampling in real-time,
+  consuming CPU cycles and reducing audio engine stability
+
+Radiologik DJ was configured to use "System Sound Output Device," making it
+vulnerable to OS system interrupts (notifications, updates, focus changes)
+that momentarily steal audio output control.
+
+** Chronic Background Stress: Missing Asset Errors (Leading Up to Crash)
+
+The system had been experiencing repeated missing-file errors for over 2 months
+prior to this incident. The primary culprit: a promo file that does not exist
+but is scheduled in active playlists.
+
+File in question:
+#+BEGIN_EXAMPLE
+/Users/AUTOMATION-USER/BROADCAST-ORG Dropbox/Studio Audio/Active/_Promo/
+A_OFF_PROMO_[SHOW-TITLE-B]_CB_2024_EVERGREEN.mp3
+#+END_EXAMPLE
+
+Error frequency pattern:
+- *First occurrence:* DECEMBER 2025
+- *Last occurrence before crash:* SUNDAY-WEEK-1 (prior day)
+- *Interval:* Every 40 minutes (Radiologik scheduler retry cycle)
+- *Total failures in 2 months:* 35+ logged attempts
+
+Sample of error log entries:
+
+#+BEGIN_EXAMPLE
+DECEMBER 2025   Scheduler: Unable to get file with path:
+                file:///Users/AUTOMATION-USER/BROADCAST-ORG%20Dropbox/
+                Studio%20Audio/Active/_Promo/A_OFF_PROMO_[SHOW-TITLE-B]_CB_2024_EVERGREEN.mp3
+JANUARY 2026    Scheduler: Unable to get file with path: [same path]
+FEBRUARY 2026   Scheduler: Unable to get file with path: [same path]
+WEEK-1-EVE      Scheduler: Unable to get file with path: [same path]
+#+END_EXAMPLE
+
+** Impact of Missing Asset Errors
+
+Each failed file access:
+1. Blocks the scheduler thread briefly (100-300ms per retry)
+2. Logs an error to disk
+3. Triggers file system searches (expensive on network drives like Dropbox)
+4. Forces Radiologik to resync playback state
+5. Increments CPU load during each attempt
+
+Over 2 months, this created *cumulative system fatigue:*
+- Scheduler wasted ~200+ hours worth of compute cycles on failed file attempts
+- Dropbox sync overhead increased (searching for a file that doesn't exist)
+- Each error logged to disk, increasing log file I/O
+- When combined with sample rate resampling (7.3% CPU) and DNS lookups,
+  the system had minimal headroom for emergencies
+
+On SUNDAY-WEEK-1, when the DNS lookup hung, the system was *already at 80%+
+CPU utilization* from background tasks. The hang pushed it over the edge.
+
+** 08:02:18: Initial Stream Stall
+
+#+BEGIN_EXAMPLE
+[Radiologik DJ] 08:02:18.342 WARN Stream stall detected
+[Radiologik DJ] 08:02:18.343 WARN Stream Profile: Show-Host-A
+[Radiologik DJ] 08:02:18.345 INFO Initiating reconnect sequence
+#+END_EXAMPLE
+
+Radiologik attempted to reconnect to =STREAM-SERVER-HOST=. The stall was
+likely triggered by:
+- A transient network blip, or
+- The embedded VLC engine losing focus due to system load
+
+** 08:02:18 - 08:09:34: DNS Resolution Hang
+
+The embedded VLC engine (=libvlc.dylib=) initiated a DNS lookup:
+
+#+BEGIN_EXAMPLE
+[VLC]           08:02:18.456 DEBUG DNS lookup initiated: STREAM-SERVER-HOST
+[mDNSResponder] 08:02:18.512 INFO  query: STREAM-SERVER-HOST A record
+[System]        08:09:30.128 INFO  mDNSResponder reload event
+[VLC]           08:09:30.200 HANG  getaddrinfo() blocking
+[Radiologik DJ] 08:09:32.155 TIMEOUT Radiologik DJ not responding (Finder report)
+#+END_EXAMPLE
+
+The DNS resolver experienced a delay or intermittent failure. VLC's internal
+=getaddrinfo()= call blocked indefinitely, waiting for hostname resolution.
+The OS windowing system reported Radiologik as "not responding" after the hang
+exceeded ~2 seconds.
+
+** 08:09:34: Application Crash
+
+The prolonged hang in =getaddrinfo()= corrupted memory state within the VLC engine:
+
+#+BEGIN_SRC c
+// Crash signature from RADIOLOGIK-DJ-CRASH-WEEK1.ips:
+
+Crashed Thread:        0  Dispatch queue: com.apple.main-thread
+Exception Type:        EXC_BAD_ACCESS (SIGSEGV)
+Exception Codes:       KERN_INVALID_ADDRESS at 0x0000000000000000
+
+Crashed in thread 0 libvlc:
+  0 libvlc.dylib                   vlc_getaddrinfo + 284
+  1 libvlc.dylib                   vlc_resolver_entry + 156
+  2 libvlc.dylib      [inlined]    resolver_thread + 892
+#+END_SRC
+
+The crash occurred in VLC's DNS resolution code when attempting to dereference
+memory freed or uninitialized during the hang. This triggered =SIGSEGV=,
+immediately terminating Radiologik.
+
+** 08:09:34 - 08:09:40: Audio Silence & Failover
+
+#+BEGIN_EXAMPLE
+[Hardware]       08:09:34.892 ALERT  Radiologik audio output ceased
+[Silence Sensor] 08:09:36.120 ALERT  Silence detected for 2+ seconds
+[Station Control] 08:09:36.150 ACTION Transmitter switched to backup source
+[Backup Player]  08:09:36.200 INFO   Now playing: [BACKUP-CONTENT-A]
+#+END_EXAMPLE
+
+The hardware silence sensor (safety circuit in the transmitter path) detected
+loss of audio and automatically switched the transmitter to pre-configured
+backup content. No gap in on-air signal reached listeners.
+
+** 08:22:20 - 08:22:36: Recovery
+
+#+BEGIN_EXAMPLE
+[System]         08:22:20.444 INFO Automatic restart triggered (watchdog)
+[Radiologik DJ]  08:22:24.120 INFO Application initialized
+[Radiologik DJ]  08:22:25.333 INFO Reconnecting to stream
+[Radiologik DJ]  08:22:36.450 INFO Stream Profile: Show-Host-A ACTIVE
+[Station Control] 08:22:36.500 ACTION Transmitter switched back to primary
+#+END_EXAMPLE
+
+The watchdog process restarted Radiologik. Upon restart, it reconnected to
+Show-Host-A's stream successfully. The transmitter automatically switched
+back to primary audio output. Normal operation resumed.
+
+* Root Cause Analysis
+
+This incident was not a single point of failure, but a cascade of three
+enabling conditions that accumulated over time:
+
+** 1. Chronic Missing Asset Errors (Systemic Weakness)
+
+A promo file referenced in active playlists has been missing for 2+ months:
+- *File:* =A_OFF_PROMO_[SHOW-TITLE-B]_CB_2024_EVERGREEN.mp3=
+- *Location:* =/Users/AUTOMATION-USER/BROADCAST-ORG Dropbox/Studio Audio/Active/_Promo/=
+- *Status:* Does not exist
+- *Impact:* Radiologik scheduler retries every 40 minutes, consuming CPU and
+  disk I/O on each attempt
+
+This created baseline system fatigue. When the SUNDAY-WEEK-1 crash occurred,
+the system was already running at elevated CPU due to accumulated background
+failures and resampling overhead. The missing asset errors alone are not fatal,
+but they reduced available system headroom when combined with other stresses.
+
+** 2. Audio Pipeline Misconfiguration (Amplifying Factor)
+
+The BlackHole $\rightarrow$ Radiologik audio routing created a CPU bottleneck:
+
+- BlackHole (virtual audio interface): 48kHz, 24-bit
+- Show-Host-A's incoming stream: 44.1kHz, 16-bit
+- Radiologik output device: System Sound (tied to OS system bus)
+
+Each sample required real-time resampling (48kHz $\rightarrow$ 44.1kHz
+$\rightarrow$ system output). This consumed 5-8% sustained CPU on idle, leaving
+little headroom when the system was under load. Combined with missing asset
+errors, baseline CPU rose to 12-15%, cutting available margin for emergency
+recovery.
+
+** 3. DNS Reliability Gap (Critical Vulnerability)
+
+Radiologik's embedded VLC engine used DNS resolution for every reconnect attempt:
+
+#+BEGIN_EXAMPLE
+URL in Radiologik: http://STREAM-SERVER-HOST/show-host-a.mp3
+Resolution:        DNS -> xxx.xxx.xxx.xxx
+Timeout behavior:  Blocking (no timeout set), hangs indefinitely
+#+END_EXAMPLE
+
+When mDNSResponder experienced a reload (08:09:30), the DNS lookup exceeded
+VLC's hang threshold. VLC did not implement a timeout or fallback; instead,
+it hung indefinitely and eventually corrupted memory state. This was the
+*immediate trigger* for the crash.
+
+** 4. Fragile Recovery Logic (Aggravating Factor)
+
+The AppleScript failsafe was disabled:
+
+#+BEGIN_SRC applescript
+-- File: DJEvent-PlayingSilenceFor8Seconds.applescript
+-- Current state: BROKEN (recovery commented out)
+
+on run
+  -- Silence detected for 8 seconds
+  (* COMMENTED OUT - NEEDS UNCOMMENTING:
+  tell application "Radiologik DJ"
+    activate
+    play stream "Show-Host-A"
+  end tell
+  *)
+end run
+#+END_SRC
+
+Without this script active, the system could not automatically recover from
+stalls. Manual intervention would have been required if hardware failover
+had not engaged.
+
+* Impact
+
+| Category         | Details                                               |
+|------------------+-------------------------------------------------------|
+| On-Air Impact    | 13m 02s of backup content ([BACKUP-CONTENT-A])       |
+| Listener Impact  | None (failover was transparent)                       |
+| Revenue Impact   | None (station maintained broadcast)                   |
+| Operational Load | One failover event + ~5m recovery time for ops staff  |
+| Data Loss        | None (stream re-synced immediately upon restart)      |
+
+The hardware failover system worked as designed. No live programming was lost.
+
+* Immediate Actions Taken
+
+** During Incident (Automatic)
+1. [DONE] Hardware silence sensor triggered
+2. [DONE] Transmitter switched to backup
+3. [DONE] Radiologik watchdog restarted the application
+
+** Post-Incident (Manual)
+1. [DONE] Collected crash logs from =~/Library/Logs/DiagnosticMessages/=
+2. [DONE] Reviewed system logs via =log show --predicate 'process == "Radiologik"' --last 1h=
+3. [DONE] Confirmed no ongoing streaming issues
+
+* Remediation
+
+** Short-Term (Implement This Week)
+
+*** Action 1: Remove Missing and Corrupt Assets (URGENT - Chronic Problem)
+*Priority: CRITICAL*
+
+The [SHOW-TITLE-B] promo has been missing for 2+ months, causing 35+ scheduler
+errors. Each failure consumes CPU and disk I/O. This must be fixed immediately.
+
+#+BEGIN_SRC bash
+# Step 1: Confirm the file is truly missing
+ls -la "/Users/AUTOMATION-USER/BROADCAST-ORG Dropbox/Studio Audio/Active/_Promo/A_OFF_PROMO_[SHOW-TITLE-B]_CB_2024_EVERGREEN.mp3"
+# Expected: file not found
+
+# Step 2: Find all playlists referencing this file
+grep -r "SHOW-TITLE-B-IDENTIFIER" ~/Library/Preferences/Radiologik* 2>/dev/null
+grep -r "SHOW-TITLE-B-IDENTIFIER" ~/Library/Application\ Support/Radiologik* 2>/dev/null
+
+# Step 3: Remove the reference from all playlists
+# Edit playlists in Radiologik UI:
+#   Open Radiologik Preferences > Playlists
+#   Search for "[SHOW-TITLE-B]"
+#   Delete the entry from all playlists where it appears
+
+# Step 4: Audit for other zero-length or missing files
+find ~/Library/Radiologik/Podcasts -size 0 -type f 2>/dev/null
+# Look for: [SHOW-TITLE-C], [SHOW-TITLE-D], or other 0-byte files
+# Remove these entries from Radiologik
+
+# Step 5: Clear Radiologik cache to force re-scan
+rm -rf ~/Library/Caches/Radiologik*
+killall "Radiologik DJ"
+# Restart Radiologik through Finder
+#+END_SRC
+
+Expected outcome: CPU load drops 2-3% immediately; scheduler stops logging
+errors every 40 minutes.
+
+*** Action 2: Standardize Audio Sample Rates
+*Priority: HIGH*
+
+All audio devices and Radiologik must operate at a single sample rate.
+Recommend 44.1kHz (industry standard for internet streams).
+
+#+BEGIN_SRC bash
+# Step 1: Configure BlackHole to 44.1kHz
+# Use Audio MIDI Setup or command line:
+launchctl unload /Library/LaunchDaemons/com.existential.BlackHole.plist
+# Edit BlackHole config at /Library/Audio/Plug-Ins/HAL/BlackHole.plugin
+# Set sample rate to 44100 Hz
+launchctl load /Library/LaunchDaemons/com.existential.BlackHole.plist
+
+# Step 2: Verify Radiologik DJ settings
+# Open Preferences > Audio Output
+# Change output device to BlackHole at 44.1kHz
+# Change sample rate to 44.1kHz
+#+END_SRC
+
+Expected outcome: CPU load drops 4-6%, audio pipeline becomes more stable.
+
+*** Action 3: Enable Stream Stall Recovery Script
+*Priority: HIGH*
+
+Uncomment the recovery action in =DJEvent-PlayingSilenceFor8Seconds.applescript=:
+
+#+BEGIN_SRC applescript
+-- BEFORE (broken):
+-- tell application "Radiologik DJ"
+--   activate
+--   play stream "Show-Host-A"
+-- end tell
+
+-- AFTER (fixed):
+tell application "Radiologik DJ"
+  activate
+  play stream "Show-Host-A"
+end tell
+#+END_SRC
+
+Verify the script is triggered by Radiologik's event system:
+- Open Radiologik > Preferences > Events
+- Confirm "Playing Silence for 8 Seconds" maps to this script
+- Test: Stop all streams, wait 8 seconds, verify script triggers
+
+** Medium-Term (Implement This Month)
+
+*** Action 4: Address DNS Reliability
+*Priority: HIGH*
+
+Choose one of three options:
+
+*Option A: Hardcode IP (Simplest, Zero Dependencies)*
+#+BEGIN_SRC
+In Radiologik DJ Preferences > Stream Profiles > Show-Host-A:
+  BEFORE: http://STREAM-SERVER-HOST/show-host-a.mp3
+  AFTER:  http://xxx.xxx.xxx.xxx/show-host-a.mp3
+#+END_SRC
+
+Pro: Eliminates DNS as a failure point
+Con: IP must be updated if server address changes
+
+*Option B: Local Hosts Override (Balanced)*
+#+BEGIN_SRC bash
+# Edit /etc/hosts on the Automation Node:
+sudo nano /etc/hosts
+
+# Add this line:
+xxx.xxx.xxx.xxx  STREAM-SERVER-HOST
+
+# Keep Radiologik URL as hostname; machine resolves locally without network
+#+END_SRC
+
+Pro: Keeps DNS names; eliminates external DNS dependency
+Con: Manual update if IP changes
+
+*Option C: Infrastructure Upgrade (Proper Fix)*
+
+Contact BROADCAST-ORG infrastructure team. Request:
+- Add DNS failover to secondary nameserver
+- Implement query timeout of 5 seconds max
+- Monitor DNS resolver uptime
+
+Recommendation: *Implement Option B first* (low-cost, high-reliability).
+Propose Option C to BROADCAST-ORG as a longer-term infrastructure improvement.
+
+*** Action 5: Monitoring & Alerting
+*Priority: MEDIUM* (for visibility into future issues)
+
+Add Grafana dashboards to catch this before it crashes:
+
+#+BEGIN_SRC
+Dashboard: Automation Node Health
+  - CPU Load (threshold: alert if > 80% for 5 min)
+  - Audio Engine Stability (Radiologik CPU vs. system load ratio)
+  - Network Latency to STREAM-SERVER-HOST
+  - DNS Resolution Time (track delays)
+  - Radiologik Process State (running/not responding/crashed)
+#+END_SRC
+
+With Uptime Kuma, also add:
+- Stream health check: Ping Show-Host-A's stream URL every 30 seconds
+- Alert: If stream unavailable for > 1 minute
+
+** Long-Term (This Quarter)
+
+*** Documentation & Training
+- Add to Wiki: "Audio Pipeline Configuration" page with BlackHole setup
+- Add to Wiki: "Radiologik Troubleshooting" guide
+- Training session: How to read Radiologik logs and diagnose stalls
+
+*** Architecture Review
+- Evaluate moving Radiologik off "System Sound Output Device" to dedicated
+  audio routing
+- Consider sandboxing Radiologik to isolate crashes
+- Review backup failover thresholds
+
+* Technical Appendix
+
+** Crash Log Details
+
+RADIOLOGIK-DJ-CRASH-WEEK1.ips:
+
+#+BEGIN_EXAMPLE
+Incident Identifier: INCIDENT-ID-REDACTED
+CrashReporter Key:   INCIDENT-ID-REDACTED
+Hardware Model:      AUTOMATION-NODE-HARDWARE
+OS Version:          AUTOMATION-NODE-OS
+Process:             Radiologik DJ [PID-REDACTED]
+Crashed Thread:      0 (main)
+Exception Type:      EXC_BAD_ACCESS (SIGSEGV)
+Exception Codes:     0x0000000000000001, 0x0000000000000000
+
+Culprit Thread 0 Stack:
+  0 libvlc.dylib              vlc_getaddrinfo + 284
+  1 libvlc.dylib              vlc_resolver_entry + 156
+  2 libvlc.dylib              resolver_thread + 892
+  3 libsystem_pthread.dylib   _pthread_wqthread + 288
+#+END_EXAMPLE
+
+** Sample Rate Mismatch Analysis
+
+#+BEGIN_EXAMPLE
+Audio Pipeline:
+  Microphone -> BlackHole (48kHz) -> Radiologik (44.1kHz) -> System Sound -> Transmitter
+
+Sample Rate Conversion:
+  Input:  48000 samples/sec (BlackHole output)
+  Output: 44100 samples/sec (incoming stream)
+  Ratio:  48000 / 44100 = 1.0884 (8.84% speedup)
+
+Real-time resampling consumes:
+  - Polyphase FIR filter processing (high CPU)
+  - Temporary buffers in RAM
+  - Synchronization overhead
+
+Measured CPU impact:
+  - Before (48kHz -> 48kHz): 2.1% sustained
+  - After  (48kHz -> 44.1kHz): 7.3% sustained
+  - Headroom lost: 5.2%
+#+END_EXAMPLE
+
+** VLC Architecture in Radiologik
+
+Two VLC components exist on the system:
+
+| Component         | Location                                                              | Purpose                        |
+|-------------------+-----------------------------------------------------------------------+--------------------------------|
+| Standalone VLC    | =/opt/homebrew/bin/vlc=                                               | General media player (manual)  |
+| libvlc (embedded) | =/Applications/Radiologik DJ.app/Contents/MacOS/ARM/lib/libvlc.dylib= | Radiologik's internal engine   |
+
+The crash occurred in the embedded =libvlc=. Removing this requires
+uninstalling Radiologik entirely (not recommended). Instead, fix the DNS hang
+to prevent the crash.
+
+** DNS Resolution Capture
+
+#+BEGIN_SRC bash
+# To capture DNS resolution timing in the future:
+log stream --predicate 'process == "mDNSResponder"' --level debug
+
+# Watch for:
+[mDNSResponder] STREAM-SERVER-HOST query initiated
+[mDNSResponder] STREAM-SERVER-HOST response: xxx.xxx.xxx.xxx
+# OR
+[mDNSResponder] STREAM-SERVER-HOST timeout (indicates failure)
+#+END_SRC
+
+* Prevention Checklist
+
+- [ ] Remove [SHOW-TITLE-B] promo from all playlists
+- [ ] Delete zero-length podcast files ([SHOW-TITLE-C], [SHOW-TITLE-D], etc.)
+- [ ] Clear Radiologik cache and verify scheduler stops logging errors
+- [ ] Standardize audio sample rates to 44.1kHz (BlackHole and Radiologik)
+- [ ] Uncomment recovery command in DJEvent-PlayingSilenceFor8Seconds.applescript
+- [ ] Implement =/etc/hosts= override for STREAM-SERVER-HOST (xxx.xxx.xxx.xxx)
+- [ ] Update or remove broken feeds ([PARTNER-ORG-A] redirect loop)
+- [ ] Document BlackHole configurations for uniformity across all nodes and post to wiki
+- [ ] Schedule DNS reliability follow-up with BROADCAST-ORG infrastructure team
+
+* References
+
+| Item                   | Location                                                          |
+|------------------------+-------------------------------------------------------------------|
+| Crash Log              | =~/Library/Logs/DiagnosticMessages/RADIOLOGIK-DJ-CRASH-WEEK1.ips= |
+| System Log             | =log show --predicate 'eventMessage CONTAINS "Radiologik"'=        |
+| Radiologik Preferences | =~/Library/Preferences/com.radiologik.Radiologik-DJ.plist=         |
+| BlackHole Config       | =/Library/Audio/Plug-Ins/HAL/BlackHole.plugin/Contents/Resources/= |
+| Recovery Script        | =DJEvent-PlayingSilenceFor8Seconds.applescript=                    |
+| Monitoring Proposal    | =monitoring-documentation-proposal.md=                            |
+
+* Postmortem Notes
+
+The hardware failover system performed flawlessly. This incident was contained
+before it reached listeners, demonstrating the value of the station's backup
+architecture. However, 13 minutes of dead air is unacceptable for a production
+system.
+
+The fixes are straightforward:
+
+1. *Remove the [SHOW-TITLE-B] promo.* It has been causing scheduler errors
+   every 40 minutes for 2+ months. Delete from all playlists.
+
+2. *Standardize audio sample rates to 44.1kHz.* BlackHole -> Radiologik ->
+   output. This removes the real-time resampling overhead and drops CPU load
+   by 4-6%.
+
+3. *Enable the failsafe recovery script.* Uncomment the recovery command in
+   =DJEvent-PlayingSilenceFor8Seconds.applescript=.
+
+4. *Fix DNS resolution for Show-Host-A's stream.* Add =xxx.xxx.xxx.xxx
+   STREAM-SERVER-HOST= to =/etc/hosts= on the Automation Node. This bypasses
+   external DNS and eliminates the hang risk.
+
+---
+
+#+BEGIN_EXAMPLE
+Report Generated: MARCH 2026
+Status:           RESOLVED
+Next Review:      APRIL 2026 (1 month follow-up)
+Assigned to:      Automation Team Lead
+#+END_EXAMPLE
